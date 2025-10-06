@@ -38,4 +38,14 @@ and you are asked to label a new game with a similar action, the label you come 
 i.e. we don't want "walk forward", "move forward", "run forward" etc. Use the most generic label possible.
 In the above case "move forward". Some other examples of generic labels are:
 "open menu", "move backward", "equip shotgun", "fire", "aim", "reload", "jump".
+
+There are some instances of bad data where users alt tab and just start typing on their keyboard.
+In this case you will see a flurry of different key presses but nothing happening on the screen. 
+If you are ever asked to label a key/button and this is the case, write "null" for the action.
+
+Since we're interested in labelling game actions primarily while in-game, menus are irrelevant. 
+If you see a menu, ignore it when labelling. If all samples you are given are in menus, write "null" for the action.
+
+If there are instances where its clear the user was typing something in some of the presented windows,
+but the game action is clear in others, just output the game action.
 """.strip()
