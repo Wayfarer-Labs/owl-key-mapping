@@ -47,4 +47,4 @@ def slice_and_bind(mp4_path, csv_path, metadata_path, fps = 60, delete_after_bin
         if delete_after_bind:
             shutil.rmtree(temp_folder_name)
 
-slice_and_bind("sample/vid.mp4", "sample/inputs.csv", delete_after_bind=False)
+slice_and_bind("sample/vid.mp4", "sample/inputs.csv", "sample/metadata.json", delete_after_bind=False)
