@@ -3,18 +3,18 @@ import pandas as pd
 import shutil
 import random
 import json
-import hashlib
 
 from owl_keys.controls.extract_button_inputs import extract_button_inputs, get_timestamps_around
 from owl_keys.visualizer.slicing import overlay_on_slices
 from owl_keys.controls.utils import decimal_to_ascii
 from owl_keys.chat.sync import ChatWrapper
 from owl_keys.chat.validation import get_output
+from owl_keys.database import KeybindingDatabase
 
 T_PLUS_MINUS = 1.0
 N_WINDOWS = 4
 
-def slice_and_bind(mp4_path, csv_path, metadata_path, fps = 60, delete_after_bind = True):
+def slice_and_bind(mp4_path, csv_path, metadata_path, fps = 60, delete_after_bind = True, db_path = "keybindings.db"):
     button_inputs = extract_button_inputs(csv_path, 60)
     unique_mouse_actions = button_inputs[button_inputs['button_type'] == 'MOUSE']['id'].unique()
     unique_keyboard_actions = button_inputs[button_inputs['button_type'] == 'KEYBOARD']['id'].unique()
@@ -23,10 +23,16 @@ def slice_and_bind(mp4_path, csv_path, metadata_path, fps = 60, delete_after_bin
     exe_name = metadata['game_exe']
     hw_id = metadata['hardware_id']
 
-    # Create a unique hash combining the exe name and hw id
-    unique_hash = hashlib.sha256(f"{exe_name}_{hw_id}".encode()).hexdigest()
+    # Check if this combo already exists in database
+    with KeybindingDatabase(db_path) as db:
+        if db.combo_exists(hw_id, exe_name):
+            print(f"Keybindings for {exe_name} + {hw_id} already exist, skipping processing")
+            existing_bindings = db.get_keybindings(hw_id, exe_name)
+            print(f"Existing bindings: {existing_bindings}")
+            return existing_bindings
 
     chat = ChatWrapper()
+    keybindings = {}
 
 #    for mouse_action in unique_mouse_actions:
 #        windows_frames, windows_ts = get_timestamps_around(button_inputs, fps, "MOUSE", mouse_action, N_WINDOWS, t_plus_minus = T_PLUS_MINUS)
@@ -42,9 +48,19 @@ def slice_and_bind(mp4_path, csv_path, metadata_path, fps = 60, delete_after_bin
             continue
         overlay_on_slices(mp4_path, button_inputs, temp_folder_name, frame_windows=windows_frames, fps=fps)
         response = chat.chat(temp_folder_name, keyboard_action, "KEYBOARD", exe_name)
-        print(f"\"{decimal_to_ascii(keyboard_action)}\": {get_output(response)} | {temp_folder_name}")
+        action = get_output(response)
+        print(f"\"{decimal_to_ascii(keyboard_action)}\": {action} | {temp_folder_name}")
+
+        keybindings[keyboard_action] = action
 
         if delete_after_bind:
             shutil.rmtree(temp_folder_name)
 
-slice_and_bind("sample/vid.mp4", "sample/inputs.csv", "sample/metadata.json", delete_after_bind=False)
+    # Store keybindings in database
+    with KeybindingDatabase(db_path) as db:
+        db.insert_keybindings(hw_id, exe_name, keybindings)
+        print(f"Stored {len(keybindings)} keybindings for {exe_name} + {hw_id}")
+
+    return keybindings
+
+slice_and_bind("sample/vid.mp4", "sample/inputs.csv", "sample/metadata.json", delete_after_bind=True)
