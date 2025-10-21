@@ -1,0 +1,10 @@
+__pycache__/
+sample/
+samples/
+.env
+
+*.pyc
+*.mp4
+*.tar
+*.db
+

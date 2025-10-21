@@ -1,0 +1,7 @@
+pandas
+opencv-python
+torch
+Pillow
+google-genai
+python-dotenv
+ray

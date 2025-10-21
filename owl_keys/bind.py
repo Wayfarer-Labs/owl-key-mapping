@@ -1,8 +1,17 @@
 import os
+import sys
 import pandas as pd
 import shutil
 import random
 import json
+
+# When this file is executed directly as a script (python owl_keys/bind.py),
+# sys.path[0] is the package directory (owl_keys/) which prevents absolute
+# imports like `from owl_keys...` from resolving. Ensure the project root is on
+# sys.path so absolute imports work both when running from repo root and when
+# running this file directly.
+if os.path.basename(sys.path[0]) == os.path.basename(os.path.dirname(__file__)):
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from owl_keys.controls.extract_button_inputs import extract_button_inputs, get_timestamps_around
 from owl_keys.visualizer.slicing import overlay_on_slices
@@ -63,4 +72,6 @@ def slice_and_bind(mp4_path, csv_path, metadata_path, fps = 60, delete_after_bin
 
     return keybindings
 
-slice_and_bind("sample/vid.mp4", "sample/inputs.csv", "sample/metadata.json", delete_after_bind=True)
+if __name__ == "__main__":
+    # Only run the example binding flow when executed as a script.
+    slice_and_bind("sample/vid.mp4", "sample/inputs.csv", "sample/metadata.json", delete_after_bind=True)
