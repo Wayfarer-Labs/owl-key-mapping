@@ -4,6 +4,7 @@ import pandas as pd
 import shutil
 import random
 import json
+import time
 from typing import Dict, Optional
 
 # Path setup for imports
@@ -15,6 +16,7 @@ from owl_keys.controls.extract_button_inputs import extract_button_inputs, get_t
 from owl_keys.visualizer.slicing import overlay_on_slices
 from owl_keys.controls.utils import decimal_to_ascii
 from owl_keys.chat.sync import ChatWrapper
+from owl_keys.chat.vertex_wrapper import VertexChatWrapper
 from owl_keys.chat.validation import get_output
 from owl_keys.database import KeybindingDatabase
 from dotenv import load_dotenv
@@ -33,7 +35,10 @@ def process_keyboard_action(
     button_inputs: pd.DataFrame,
     fps: int,
     exe_name: str,
-    delete_after_bind: bool = True
+    delete_after_bind: bool = True,
+    use_vertex: bool = False,
+    vertex_model: str = "gemini-2.0-flash-exp",
+    gemini_model: str = "gemini-2.5-flash-lite"
 ) -> tuple[int, Optional[str], str]:
     """
     Process a single keyboard action: create video clips, send to LLM, get label.
@@ -56,8 +61,12 @@ def process_keyboard_action(
         # Create video clips with overlays
         overlay_on_slices(mp4_path, button_inputs, temp_folder_name, frame_windows=windows_frames, fps=fps)
         
-        # Query LLM
-        chat = ChatWrapper()
+        # Query LLM - choose between Gemini API or Vertex API
+        if use_vertex:
+            chat = VertexChatWrapper(model=vertex_model)
+        else:
+            chat = ChatWrapper(model=gemini_model)
+        
         response = chat.chat(temp_folder_name, keyboard_action, "KEYBOARD", exe_name)
         action = get_output(response)
         
@@ -78,13 +87,19 @@ def slice_and_bind_parallel(
     fps: int = 60,
     delete_after_bind: bool = True,
     db_path: str = "keybindings.db",
-    max_parallel: int = 16  # Limit concurrent tasks to avoid API rate limits
+    max_parallel: int = 16,  # Limit concurrent tasks to avoid API rate limits
+    use_vertex: bool = False,  # Whether to use Vertex API instead of Gemini API
+    vertex_model: str = "gemini-2.0-flash-exp",  # Model to use with Vertex API
+    gemini_model: str = "gemini-2.5-flash-lite"  # Model to use with Gemini API
 ) -> Dict[int, str]:
     """
     Parallelized version of slice_and_bind using Ray.
     
     Args:
         max_parallel: Maximum number of parallel tasks (adjust based on API rate limits)
+        use_vertex: If True, use Vertex API; if False, use Gemini API
+        vertex_model: Model name for Vertex API
+        gemini_model: Model name for Gemini API
     """
     # Extract button inputs
     button_inputs = extract_button_inputs(csv_path, fps)
@@ -108,13 +123,18 @@ def slice_and_bind_parallel(
     if not ray.is_initialized():
         ray.init()
 
-    print(f"Processing {len(unique_keyboard_actions)} keyboard actions in parallel (max {max_parallel} concurrent)...")
+    api_type = "Vertex API" if use_vertex else "Gemini API"
+    model_name = vertex_model if use_vertex else gemini_model
+    print(f"Processing {len(unique_keyboard_actions)} keyboard actions in parallel using {api_type} with model {model_name} (max {max_parallel} concurrent)...")
     
     # Put shared data in Ray object store to avoid serialization overhead
     mp4_ref = ray.put(mp4_path)
     button_inputs_ref = ray.put(button_inputs)
     fps_ref = ray.put(fps)
     exe_name_ref = ray.put(exe_name)
+    use_vertex_ref = ray.put(use_vertex)
+    vertex_model_ref = ray.put(vertex_model)
+    gemini_model_ref = ray.put(gemini_model)
     
     # Submit all tasks
     futures = []
@@ -125,7 +145,10 @@ def slice_and_bind_parallel(
             button_inputs_ref,
             fps_ref,
             exe_name_ref,
-            delete_after_bind
+            delete_after_bind,
+            use_vertex_ref,
+            vertex_model_ref,
+            gemini_model_ref
         )
         futures.append(future)
     
@@ -150,18 +173,36 @@ def slice_and_bind_parallel(
     
     return keybindings
 
-
 if __name__ == "__main__":
-    try:
-        keybindings = slice_and_bind_parallel(
-            "sample/vid.mp4",
-            "sample/inputs.csv",
-            "sample/metadata.json",
-            delete_after_bind=True,
-            max_parallel=16  # Adjust based on Gemini API rate limits
-        )
-        print(f"\nFinal keybindings: {keybindings}")
-    finally:
-        # Shutdown Ray
-        if ray.is_initialized():
-            ray.shutdown()
+    sample_dirs = os.listdir("samples")
+    start_time = time.time()
+    for sample in sample_dirs:
+        try:
+            # Example 1: Using Gemini API (default)
+            # print("=== Using Gemini API ===")
+            # keybindings = slice_and_bind_parallel(
+            #     f"samples/{sample}/vid.mp4",
+            #     f"samples/{sample}/inputs.csv",
+            #     f"samples/{sample}/metadata.json",
+            #     delete_after_bind=True,
+            #     max_parallel=16,  # Adjust based on Gemini API rate limits
+            #     use_vertex=False  # Use Gemini API
+            # )
+            
+            # Example 2: Using Vertex API
+            # Uncomment to test with Vertex API
+            print("\n=== Using Vertex API ===")
+            keybindings = slice_and_bind_parallel(
+                f"samples/{sample}/vid.mp4",
+                f"samples/{sample}/inputs.csv",
+                f"samples/{sample}/metadata.json",
+                delete_after_bind=True,
+                max_parallel=40,  # May need lower limit for Vertex API
+                use_vertex=True,
+                vertex_model="gemini-2.0-flash-exp"
+            )
+            print(f"\nFinal keybindings (Vertex): {keybindings}")
+        finally:
+            # Shutdown Ray
+            if ray.is_initialized():
+                ray.shutdown()
