@@ -16,6 +16,9 @@ class ChatWrapper:
 
     def chat(self, video_dir_path, action_id, action_type = "KEYBOARD", exe_name = None):
         video_files = glob.glob(os.path.join(video_dir_path, "*.mp4"))
+        if not video_files:
+            raise ValueError(f"No video files found in {video_dir_path}")
+        
         video_bytes_list = [open(video_file, "rb").read() for video_file in video_files]
 
         parts = [types.Part(text=PROMPT_1)]
