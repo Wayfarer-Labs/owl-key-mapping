@@ -90,7 +90,7 @@ def slice_and_bind_parallel(
     db_path: str = "keybindings.db",
     max_parallel: int = 16,  # Limit concurrent tasks to avoid API rate limits
     use_vertex: bool = False,  # Whether to use Vertex API instead of Gemini API
-    vertex_model: str = "gemini-2.0-flash-exp",  # Model to use with Vertex API
+    vertex_model: str = "google/gemini-2.0-flash",  # Model to use with Vertex API
     gemini_model: str = "gemini-2.5-flash-lite"  # Model to use with Gemini API
 ) -> Dict[int, str]:
     """
@@ -212,7 +212,7 @@ if __name__ == "__main__":
                 delete_after_bind=True,
                 max_parallel=40,  # May need lower limit for Vertex API
                 use_vertex=True,
-                vertex_model="google/gemini-2.0-flash-exp"
+                # vertex_model="google/gemini-2.0-flash-exp"
             )
             print(f"\nFinal keybindings (Vertex): {keybindings}")
         finally:
