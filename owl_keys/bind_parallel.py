@@ -175,11 +175,18 @@ def slice_and_bind_parallel(
     return keybindings
 
 if __name__ == "__main__":
-    sample_dirs = os.listdir("samples")
+    import argparse
+    parser = argparse.ArgumentParser(description="Bind keybindings in parallel using Gemini or Vertex API")
+    parser.add_argument("--data_dir", type=str, default="/mnt/data/waypoint_1/owl_control/kbm/fps", help="Directory containing sample subdirectories")
+    parser.add_argument("--db_path", type=str, default="keybindings.db", help="Path to the keybinding database")
+    parser.add_argument("--use_google_genai", action="store_true", help="Use Vertex API instead of Gemini API")
+    parser.add_argument("--max_parallel", type=int, default=31, help="Maximum number of parallel tasks")
+    args = parser.parse_args()
+    sample_dirs = os.listdir(args.data_dir)
     start_time = time.time()
     for sample in sample_dirs[1:]:
         try:
-            mp4_dir = os.path.join("samples", sample)
+            mp4_dir = os.path.join(args.data_dir, sample)
             mp4_files = [f for f in os.listdir(mp4_dir) if f.lower().endswith(".mp4")]
             if not mp4_files:
                 print(f"No mp4 found in {mp4_dir}, skipping {sample}")
@@ -190,28 +197,29 @@ if __name__ == "__main__":
             print(f"Found mp4: {mp4_name} ({mp4_path})")
 
             # Ensure the expected filename used later (vid.mp4) exists.
-            expected_vid = os.path.join(mp4_dir, "vid.mp4")
-            if os.path.abspath(mp4_path) != os.path.abspath(expected_vid):
-                try:
-                    if os.path.exists(expected_vid) or os.path.islink(expected_vid):
-                        os.remove(expected_vid)
-                    # create a relative symlink named vid.mp4 pointing to the actual mp4
-                    os.symlink(mp4_name, expected_vid)
-                    print(f"Created symlink {expected_vid} -> {mp4_name}")
-                except Exception as e:
-                    # fallback to copying if symlink creation fails
-                    shutil.copy(mp4_path, expected_vid)
-                    print(f"Copied {mp4_name} to vid.mp4 due to symlink error: {e}")
-
+            # expected_vid = os.path.join(mp4_dir, "vid.mp4")
+            # if os.path.abspath(mp4_path) != os.path.abspath(expected_vid):
+            #     try:
+            #         if os.path.exists(expected_vid) or os.path.islink(expected_vid):
+            #             os.remove(expected_vid)
+            #         # create a relative symlink named vid.mp4 pointing to the actual mp4
+            #         os.symlink(mp4_name, expected_vid)
+            #         print(f"Created symlink {expected_vid} -> {mp4_name}")
+            #     except Exception as e:
+            #         # fallback to copying if symlink creation fails
+            #         shutil.copy(mp4_path, expected_vid)
+            #         print(f"Copied {mp4_name} to vid.mp4 due to symlink error: {e}")
+            use_vertex = not args.use_google_genai
             print("\n=== Using Vertex API ===")
             keybindings = slice_and_bind_parallel(
                 # f"samples/{sample}/vid.mp4",
                 mp4_path,
-                f"samples/{sample}/inputs.csv",
-                f"samples/{sample}/metadata.json",
+                f"{args.data_dir}/{sample}/inputs.csv",
+                f"{args.data_dir}/{sample}/metadata.json",
+                db_path=args.db_path,
                 delete_after_bind=True,
-                max_parallel=40,  # May need lower limit for Vertex API
-                use_vertex=True,
+                max_parallel=args.max_parallel,  # May need lower limit for Vertex API
+                use_vertex=use_vertex,
                 # vertex_model="google/gemini-2.0-flash-exp"
             )
             print(f"\nFinal keybindings (Vertex): {keybindings}")
