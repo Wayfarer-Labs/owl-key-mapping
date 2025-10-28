@@ -182,6 +182,14 @@ if __name__ == "__main__":
     parser.add_argument("--use_google_genai", action="store_true", help="Use Vertex API instead of Gemini API")
     parser.add_argument("--max_parallel", type=int, default=31, help="Maximum number of parallel tasks")
     args = parser.parse_args()
+
+    if os.path.exists(args.data_dir):
+        print(f"Data directory: {args.data_dir}")
+    else:
+        print(f"Data directory {args.data_dir} does not exist!")
+        sys.exit(1)
+    print(f"Database path: {args.db_path} | Using google vertex: {not args.use_google_genai} | Max parallel: {args.max_parallel}")
+    
     sample_dirs = os.listdir(args.data_dir)
     start_time = time.time()
     for sample in sample_dirs[1:]:
