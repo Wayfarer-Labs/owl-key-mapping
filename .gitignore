@@ -3,6 +3,7 @@ sample/
 samples/
 .env
 
+*.log
 *.pyc
 *.mp4
 *.tar

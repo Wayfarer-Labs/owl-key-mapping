@@ -5,6 +5,7 @@ import shutil
 import random
 import json
 import time
+import logging
 from typing import Dict, Optional
 
 # Path setup for imports
@@ -21,14 +22,18 @@ from owl_keys.chat.validation import get_output
 from owl_keys.database import KeybindingDatabase
 from dotenv import load_dotenv
 import ray
+from tqdm import tqdm
 
 load_dotenv()  # Load environment variables from .env file
 
 T_PLUS_MINUS = 1.0
 N_WINDOWS = 4
 
+# Suppress Ray logs
+os.environ["RAY_DEDUP_LOGS"] = "0"
+logging.getLogger("ray").setLevel(logging.WARNING)
 
-@ray.remote
+
 def process_keyboard_action(
     keyboard_action: int,
     mp4_path: str,
@@ -47,7 +52,6 @@ def process_keyboard_action(
         tuple of (keyboard_action, action_label, temp_folder_name)
     """
     temp_folder_name = f"clips/temp_{random.randint(0, 1000000)}"
-    # print(f"Processing action {decimal_to_ascii(keyboard_action)} in {temp_folder_name}...")
     
     try:
         windows_frames, windows_ts = get_timestamps_around(
@@ -55,8 +59,8 @@ def process_keyboard_action(
         )
         
         if len(windows_frames) < N_WINDOWS:
-            print(f"{windows_frames} less than {N_WINDOWS}")
-            print(f"Not enough windows to classify {decimal_to_ascii(keyboard_action)}")
+            logging.debug(f"{windows_frames} less than {N_WINDOWS}")
+            logging.debug(f"Not enough windows to classify {decimal_to_ascii(keyboard_action)}")
             return keyboard_action, None, temp_folder_name
         
         # Create video clips with overlays
@@ -71,7 +75,7 @@ def process_keyboard_action(
         response = chat.chat(temp_folder_name, keyboard_action, "KEYBOARD", exe_name)
         action = get_output(response)
         
-        print(f"\"{decimal_to_ascii(keyboard_action)}\": {action} | {temp_folder_name}")
+        logging.info(f"\"{decimal_to_ascii(keyboard_action)}\": {action} | {temp_folder_name}")
         
         return keyboard_action, action, temp_folder_name
         
@@ -81,157 +85,200 @@ def process_keyboard_action(
             shutil.rmtree(temp_folder_name)
 
 
-def slice_and_bind_parallel(
-    mp4_path: str,
-    csv_path: str,
-    metadata_path: str,
-    fps: int = 60,
+@ray.remote
+def process_video_sample(
+    sample_dir: str,
+    data_dir: str,
+    db_path: str,
     delete_after_bind: bool = True,
-    db_path: str = "keybindings.db",
-    max_parallel: int = 16,  # Limit concurrent tasks to avoid API rate limits
-    use_vertex: bool = False,  # Whether to use Vertex API instead of Gemini API
-    vertex_model: str = "google/gemini-2.0-flash",  # Model to use with Vertex API
-    gemini_model: str = "gemini-2.5-flash-lite"  # Model to use with Gemini API
-) -> Dict[int, str]:
+    use_vertex: bool = False,
+    vertex_model: str = "google/gemini-2.0-flash",
+    gemini_model: str = "gemini-2.5-flash-lite",
+    fps: int = 60
+) -> tuple[str, Optional[Dict[int, str]], Optional[str]]:
     """
-    Parallelized version of slice_and_bind using Ray.
+    Process a single video sample: extract inputs, process all keyboard actions sequentially.
+    
+    Returns:
+        tuple of (sample_name, keybindings_dict or None, error_message or None)
+    """
+    try:
+        mp4_dir = os.path.join(data_dir, sample_dir)
+        mp4_files = [f for f in os.listdir(mp4_dir) if f.lower().endswith(".mp4")]
+        
+        if not mp4_files:
+            return sample_dir, None, f"No mp4 found in {mp4_dir}"
+        
+        mp4_name = mp4_files[0]
+        mp4_path = os.path.join(mp4_dir, mp4_name)
+        csv_path = os.path.join(data_dir, sample_dir, "inputs.csv")
+        metadata_path = os.path.join(data_dir, sample_dir, "metadata.json")
+        
+        # Extract button inputs
+        button_inputs = extract_button_inputs(csv_path, fps)
+        unique_keyboard_actions = button_inputs[button_inputs['button_type'] == 'KEYBOARD']['id'].unique()
+        
+        # Load metadata
+        with open(metadata_path, "r") as f:
+            metadata = json.load(f)
+        exe_name = metadata['game_exe']
+        hw_id = metadata['hardware_id']
+        
+        # Check if already processed
+        with KeybindingDatabase(db_path) as db:
+            if db.combo_exists(hw_id, exe_name):
+                existing_bindings = db.get_keybindings(hw_id, exe_name)
+                return sample_dir, existing_bindings, None
+        
+        # Process keyboard actions sequentially
+        keybindings = {}
+        for keyboard_action in unique_keyboard_actions:
+            keyboard_action_int, action, temp_folder = process_keyboard_action(
+                keyboard_action,
+                mp4_path,
+                button_inputs,
+                fps,
+                exe_name,
+                delete_after_bind,
+                use_vertex,
+                vertex_model,
+                gemini_model
+            )
+            if action is not None:
+                keybindings[keyboard_action_int] = action
+        
+        # Store results in database
+        with KeybindingDatabase(db_path) as db:
+            db.insert_keybindings(hw_id, exe_name, keybindings)
+        
+        return sample_dir, keybindings, None
+        
+    except Exception as e:
+        return sample_dir, None, str(e)
+
+
+def process_videos_parallel(
+    data_dir: str,
+    db_path: str = "keybindings.db",
+    max_parallel: int = 16,
+    delete_after_bind: bool = True,
+    use_vertex: bool = False,
+    vertex_model: str = "google/gemini-2.0-flash",
+    gemini_model: str = "gemini-2.5-flash-lite",
+    fps: int = 60
+) -> Dict[str, Dict[int, str]]:
+    """
+    Process multiple video samples in parallel using Ray.
+    Each video is processed as a separate Ray task, with keyboard actions processed sequentially within each video.
     
     Args:
-        max_parallel: Maximum number of parallel tasks (adjust based on API rate limits)
+        data_dir: Directory containing sample subdirectories
+        db_path: Path to the keybinding database
+        max_parallel: Maximum number of parallel video processing tasks
+        delete_after_bind: Whether to delete temporary files after processing
         use_vertex: If True, use Vertex API; if False, use Gemini API
         vertex_model: Model name for Vertex API
         gemini_model: Model name for Gemini API
+        fps: Frames per second for video processing
+        
+    Returns:
+        Dictionary mapping sample names to their keybindings
     """
-    # Extract button inputs
-    button_inputs = extract_button_inputs(csv_path, fps)
-    unique_keyboard_actions = button_inputs[button_inputs['button_type'] == 'KEYBOARD']['id'].unique()
-    
-    # Load metadata
-    with open(metadata_path, "r") as f:
-        metadata = json.load(f)
-    exe_name = metadata['game_exe']
-    hw_id = metadata['hardware_id']
-
-    # Check if already processed
-    with KeybindingDatabase(db_path) as db:
-        if db.combo_exists(hw_id, exe_name):
-            print(f"Keybindings for {exe_name} + {hw_id} already exist, skipping processing")
-            existing_bindings = db.get_keybindings(hw_id, exe_name)
-            print(f"Existing bindings: {existing_bindings}")
-            return existing_bindings
-
-    # Initialize Ray
+    # Initialize Ray once
     if not ray.is_initialized():
-        ray.init()
-
+        ray.init(num_cpus=max_parallel, logging_level=logging.WARNING)
+    
+    # Get all sample directories
+    sample_dirs = [d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))]
+    total_samples = len(sample_dirs)
+    
     api_type = "Vertex API" if use_vertex else "Gemini API"
     model_name = vertex_model if use_vertex else gemini_model
-    print(f"Processing {len(unique_keyboard_actions)} keyboard actions in parallel using {api_type} with model {model_name} (max {max_parallel} concurrent)...")
+    logging.info(f"Processing {total_samples} video samples in parallel using {api_type} with model {model_name} (max {max_parallel} concurrent)...")
     
-    # Put shared data in Ray object store to avoid serialization overhead
-    mp4_ref = ray.put(mp4_path)
-    button_inputs_ref = ray.put(button_inputs)
-    fps_ref = ray.put(fps)
-    exe_name_ref = ray.put(exe_name)
-    use_vertex_ref = ray.put(use_vertex)
-    vertex_model_ref = ray.put(vertex_model)
-    gemini_model_ref = ray.put(gemini_model)
-    
-    # Submit all tasks
+    # Submit all video processing tasks at once
     futures = []
-    for keyboard_action in unique_keyboard_actions:
-        future = process_keyboard_action.remote(
-            keyboard_action,
-            mp4_ref,
-            button_inputs_ref,
-            fps_ref,
-            exe_name_ref,
+    for sample_dir in sample_dirs:
+        future = process_video_sample.options(num_cpus=1).remote(
+            sample_dir,
+            data_dir,
+            db_path,
             delete_after_bind,
-            use_vertex_ref,
-            vertex_model_ref,
-            gemini_model_ref
+            use_vertex,
+            vertex_model,
+            gemini_model,
+            fps
         )
         futures.append(future)
     
-    # Process results in batches to control parallelism
-    keybindings = {}
-    batch_size = max_parallel
+    # Process results as they complete with tqdm progress bar
+    all_keybindings = {}
     
-    for i in range(0, len(futures), batch_size):
-        batch = futures[i:i + batch_size]
-        results = ray.get(batch)
-        
-        for keyboard_action, action, temp_folder in results:
-            if action is not None:
-                keybindings[keyboard_action] = action
-
-    # Store results in database
-    with KeybindingDatabase(db_path) as db:
-        db.insert_keybindings(hw_id, exe_name, keybindings)
-        print(f"Stored {len(keybindings)} keybindings for {exe_name} + {hw_id}")
-
-    print(f"Completed processing {len(keybindings)}/{len(unique_keyboard_actions)} keyboard actions")
+    with tqdm(total=total_samples, desc="Processing videos", unit="video") as pbar:
+        while futures:
+            # Wait for any task to complete
+            done, futures = ray.wait(futures, num_returns=1, timeout=None)
+            
+            for done_ref in done:
+                try:
+                    sample_name, keybindings, error = ray.get(done_ref)
+                    if error:
+                        logging.warning(f"Error processing {sample_name}: {error}")
+                    elif keybindings:
+                        all_keybindings[sample_name] = keybindings
+                        logging.info(f"Completed {sample_name}: {len(keybindings)} keybindings")
+                except Exception as e:
+                    logging.error(f"Failed to get result: {e}")
+                
+                pbar.update(1)
     
-    return keybindings
+    logging.info(f"Completed processing {len(all_keybindings)}/{total_samples} video samples")
+    
+    return all_keybindings
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Bind keybindings in parallel using Gemini or Vertex API")
     parser.add_argument("--data_dir", type=str, default="/mnt/data/waypoint_1/owl_control/kbm/fps", help="Directory containing sample subdirectories")
     parser.add_argument("--db_path", type=str, default="keybindings.db", help="Path to the keybinding database")
-    parser.add_argument("--use_google_genai", action="store_true", help="Use Vertex API instead of Gemini API")
-    parser.add_argument("--max_parallel", type=int, default=31, help="Maximum number of parallel tasks")
+    parser.add_argument("--use_google_genai", action="store_true", help="Use Gemini API instead of Vertex API")
+    parser.add_argument("--max_parallel", type=int, default=31, help="Maximum number of parallel video processing tasks")
+    parser.add_argument("--fps", type=int, default=60, help="Frames per second for video processing")
     args = parser.parse_args()
 
+    # Set up logging
+    logging.basicConfig(
+        filename='keybinding_processing.log',
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
     if os.path.exists(args.data_dir):
-        print(f"Data directory: {args.data_dir}")
+        logging.info(f"Data directory: {args.data_dir}")
     else:
         print(f"Data directory {args.data_dir} does not exist!")
         sys.exit(1)
-    print(f"Database path: {args.db_path} | Using google vertex: {not args.use_google_genai} | Max parallel: {args.max_parallel}")
     
-    sample_dirs = os.listdir(args.data_dir)
-    start_time = time.time()
-    for sample in sample_dirs[1:]:
-        try:
-            mp4_dir = os.path.join(args.data_dir, sample)
-            mp4_files = [f for f in os.listdir(mp4_dir) if f.lower().endswith(".mp4")]
-            if not mp4_files:
-                print(f"No mp4 found in {mp4_dir}, skipping {sample}")
-                continue
-            # each dir contains only one mp4
-            mp4_name = mp4_files[0]
-            mp4_path = os.path.join(mp4_dir, mp4_name)
-            print(f"Found mp4: {mp4_name} ({mp4_path})")
-
-            # Ensure the expected filename used later (vid.mp4) exists.
-            # expected_vid = os.path.join(mp4_dir, "vid.mp4")
-            # if os.path.abspath(mp4_path) != os.path.abspath(expected_vid):
-            #     try:
-            #         if os.path.exists(expected_vid) or os.path.islink(expected_vid):
-            #             os.remove(expected_vid)
-            #         # create a relative symlink named vid.mp4 pointing to the actual mp4
-            #         os.symlink(mp4_name, expected_vid)
-            #         print(f"Created symlink {expected_vid} -> {mp4_name}")
-            #     except Exception as e:
-            #         # fallback to copying if symlink creation fails
-            #         shutil.copy(mp4_path, expected_vid)
-            #         print(f"Copied {mp4_name} to vid.mp4 due to symlink error: {e}")
-            use_vertex = not args.use_google_genai
-            print("\n=== Using Vertex API ===")
-            keybindings = slice_and_bind_parallel(
-                # f"samples/{sample}/vid.mp4",
-                mp4_path,
-                f"{args.data_dir}/{sample}/inputs.csv",
-                f"{args.data_dir}/{sample}/metadata.json",
-                db_path=args.db_path,
-                delete_after_bind=True,
-                max_parallel=args.max_parallel,  # May need lower limit for Vertex API
-                use_vertex=use_vertex,
-                # vertex_model="google/gemini-2.0-flash-exp"
-            )
-            print(f"\nFinal keybindings (Vertex): {keybindings}")
-        finally:
-            # Shutdown Ray
-            if ray.is_initialized():
-                ray.shutdown()
+    use_vertex = not args.use_google_genai
+    logging.info(f"Database path: {args.db_path} | Using Vertex API: {use_vertex} | Max parallel: {args.max_parallel}")
+    
+    try:
+        all_keybindings = process_videos_parallel(
+            data_dir=args.data_dir,
+            db_path=args.db_path,
+            max_parallel=args.max_parallel,
+            delete_after_bind=True,
+            use_vertex=use_vertex,
+            fps=args.fps
+        )
+        
+        logging.info(f"Successfully processed {len(all_keybindings)} video samples")
+        print(f"\nCompleted! Processed {len(all_keybindings)} video samples.")
+        
+    except Exception as e:
+        logging.error(f"Error during parallel processing: {e}")
+        raise
+    finally:
+        # Shutdown Ray
+        if ray.is_initialized():
+            ray.shutdown()
