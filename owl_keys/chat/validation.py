@@ -22,4 +22,11 @@ def get_output(message):
         # If all else fails, return None
         return None
 
-    return data.get("action")
+    action = data.get("action")
+    
+    # NEW: Handle case where action is a list
+    if isinstance(action, list):
+        # Take the first element if it's a list
+        return action[0] if action else None
+    
+    return action
