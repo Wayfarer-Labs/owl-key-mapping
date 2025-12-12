@@ -23,8 +23,25 @@ def extract_button_inputs(csv_path, fps):
         - id: integer identifier for the event
         - frame_idx: frame number (relative to START event)
     """
-    # Load CSV
-    df = pd.read_csv(csv_path)
+    # Load CSV - only read the first 3 columns to avoid issues with malformed JSON in event_args
+    # Some CSVs have JSON with unescaped quotes that breaks parsing
+    df = pd.read_csv(
+        csv_path, 
+        usecols=[0, 1, 2],
+        names=['timestamp', 'event_type', 'event_args'],
+        header=0,
+        on_bad_lines='skip',
+        low_memory=False
+    )
+    
+    # Convert timestamp to numeric, coercing errors
+    df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+    
+    # Drop rows where timestamp couldn't be parsed
+    df = df.dropna(subset=['timestamp'])
+    
+    if df.empty or df['timestamp'].isna().all():
+        raise ValueError(f"Could not parse 'timestamp' column as numeric in {csv_path}")
 
     # Find start time and normalize timestamps
     start_mask = df["event_type"] == "START"
@@ -34,6 +51,9 @@ def extract_button_inputs(csv_path, fps):
 
     # Filter for keyboard and mouse button events only
     df = df[df["event_type"].isin(["KEYBOARD", "MOUSE_BUTTON"])].copy()
+    
+    if df.empty:
+        raise ValueError(f"No KEYBOARD or MOUSE_BUTTON events found in {csv_path}")
 
     # Parse event_args to extract button ID and pressed state
     parsed_args = df["event_args"].apply(lambda x: safe_eval(x))

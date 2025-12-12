@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from owl_keys.controls.utils import decimal_to_ascii
 
-conn = sqlite3.connect("my_keybindings.db")
+conn = sqlite3.connect("keybindings_1.1.db")
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
 
